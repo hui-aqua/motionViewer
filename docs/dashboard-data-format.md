@@ -1,106 +1,205 @@
-﻿# CoreS3 binary format reference
+# Binary Data Format
 
-This reference describes what [dashboard/decoder.js](../dashboard/decoder.js) currently reads. Offsets and semantics were verified against the authoritative Motion Logger DATA_FORMAT.md sections 6.4-6.8 and src/storage/RecordFormats.h in the sibling CoreS3_MotionLogger project. Firmware source is outside this checkout. Filenames do not determine version. Fields are packed little-endian; text fields are NUL-terminated/padded and trimmed by the decoder. Records follow the declared header.
+Firmware 1.2.0 uses RAW v3 locally and SUMMARY v4 for upload.
 
-See the [Developer Manual](../DEVELOPER_MANUAL.md) for decoding APIs and the [User Manual](../README.md) for viewing.
+## 1. Global encoding rules (both formats)
 
-## Layouts and validation
+- Little-endian. Signed = two's complement.
+- Serialize field-by-field at explicit offsets with helpers (`put_u16/put_u32/put_u64/put_i16`, matching `get_*`).
+  Do not rely on packed-struct memcpy for on-disk I/O. Add offset tests for every field.
+- Strings: fixed-length ASCII, NUL-padded; may be unterminated when full.
+- Reserved bytes: write 0; readers ignore.
+- **CRC32** = IEEE/zlib (reflected poly 0xEDB88320, init 0xFFFFFFFF, xorout 0xFFFFFFFF). Vector `"123456789"` → `0xCBF43926`.
+- **CRC16** = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, xorout 0). Vector `"123456789"` → `0x29B1`.
+- Sensor values are raw BMI270 counts. Physical units: `acc_g = count * acc_range_g / 32768`, `gyro_dps = count * gyro_range_dps / 32768`.
+- Headers are written **once** at creation and never rewritten.
+- Readers take sizes from header fields and ignore unknown trailing bytes. Future changes may only append fields.
 
-| Magic | Version | Header bytes | Record bytes |
-|---|---:|---:|---:|
-| CS3RAW01 | 1 | 73 | 22 |
-| CS3RAW01 | 2 | 81 | 22 |
-| CS3SUM01 | 1 | 32 | 90 |
-| CS3SUM01 | 2 | 75 | 90 |
-| CS3SUM01 | 3 | 75 | 90 |
+---
 
-Common fields: magic at offset 0 (8 bytes), uint16 version at 8 and uint16 header size at 10. Unknown magic/version, wrong header/record sizes and truncated headers throw. RAW ranges and rate must be positive. Complete records are read; incomplete tail bytes are reported, not repaired. A header-only recording is accepted.
+## 2. RAW v3 (local only)
 
-## RAW header offsets
+### 2.1 Layout
 
-| Offset | Type | Meaning |
-|---:|---|---|
-| 12 | text[16] | Device |
-| 28 | text[16] | Firmware |
-| 44 | text[21] | Creation UTC |
-| 65 | int16 | Acceleration full-scale range in g |
-| 67 | int16 | Gyroscope full-scale range in degrees/s |
-| 69 | uint16 | Configured sample rate |
-| 71 | uint16 | Record size, must be 22 |
-| 73 | uint8, v2 only | Header time-valid |
-| 77 | uint32, v2 only | Dropped samples |
+```
+[file header 512 B][block 0: 4096 B][block 1: 4096 B] ...
+block = block header 64 B + 336 samples × 12 B (4032 B) = 4096 B
+```
 
-Bytes 74–76 are not interpreted. For v1, time-valid and dropped-sample header metadata are null.
+One RAW file per UTC day per device; keep current directory and naming. Same-day sessions append blocks.
+Only sidecar case: if an existing same-day file's **header** is invalid, create `<name>_bNN.bin` (NN = 01..99) and log it.
 
-## RAW record offsets
+### 2.2 File header — 512 B
 
-| Offset | Type | Meaning |
-|---:|---|---|
-| 0 | uint64 | Sensor time in microseconds |
-| 8, 10, 12 | int16 each | Acceleration X/Y/Z counts |
-| 14, 16, 18 | int16 each | Gyroscope X/Y/Z counts |
-| 20 | uint16 | Status |
+| Off  | Size | Type     | Field             | Value / note                      |
+| ---- | ---- | -------- | ----------------- | --------------------------------- |
+| 0    | 8    | char[8]  | magic             | `CS3RAW01`                        |
+| 8    | 2    | u16      | format_version    | 3                                 |
+| 10   | 2    | u16      | header_size       | 512                               |
+| 12   | 2    | u16      | block_size        | 4096                              |
+| 14   | 2    | u16      | block_header_size | 64                                |
+| 16   | 2    | u16      | sample_size       | 12                                |
+| 18   | 2    | u16      | rate_hz           | 100                               |
+| 20   | 16   | char[16] | device_id         |                                   |
+| 36   | 16   | char[16] | firmware_version  |                                   |
+| 52   | 4    | u32      | raw_date          | YYYYMMDD (UTC; 0 if time invalid) |
+| 56   | 8    | u64      | created_utc_ms    | 0 if time invalid                 |
+| 64   | 2    | u16      | acc_range_g       |                                   |
+| 66   | 2    | u16      | gyro_range_dps    |                                   |
+| 68   | 1    | u8       | acc_conf          | BMI270 ACC_CONF raw               |
+| 69   | 1    | u8       | gyr_conf          | GYR_CONF raw                      |
+| 70   | 1    | u8       | fifo_config       | FIFO_DOWNS raw (0x88)             |
+| 71   | 1    | u8       | time_valid        | 0/1 at creation                   |
+| 72   | 436  | u8[]     | reserved          | 0                                 |
+| 508  | 4    | u32      | header_crc32      | over bytes 0..507                 |
 
-Acceleration = counts × header range / 32768 g. Gyroscope = counts × header range / 32768 degrees/s. Counts are retained even if invalid; engineering axes become null when their validity bit is clear.
+### 2.3 Block header — 64 B
 
-| Status bit | Meaning |
-|---:|---|
-| 0 | Acceleration valid |
-| 1 | Gyroscope valid |
-| 2 | Acceleration saturated |
-| 3 | Gyroscope saturated |
-| 4 | Loss detected |
-| 5 | Calendar time valid |
+| Off  | Size | Type    | Field                | Note                                                |
+| ---- | ---- | ------- | -------------------- | --------------------------------------------------- |
+| 0    | 4    | char[4] | block_magic          | `CS3B`                                              |
+| 4    | 4    | u32     | block_seq            | 0-based, contiguous within the file across sessions |
+| 8    | 4    | u32     | segment_id           | same as SegmentIndex / SUMMARY                      |
+| 12   | 4    | u32     | boot_count           | from NVS                                            |
+| 16   | 8    | u64     | first_sample_index   | session-cumulative index of sample 0                |
+| 24   | 8    | u64     | anchor_mono_us       | monotonic time of anchor sample                     |
+| 32   | 8    | u64     | anchor_utc_ms        | 0 if UTC invalid                                    |
+| 40   | 4    | u32     | anchor_sensortime    | 24-bit SensorTime raw ticks                         |
+| 44   | 2    | u16     | anchor_sample_offset | index in block that the anchor refers to            |
+| 46   | 2    | u16     | sample_count         | 1..336                                              |
+| 48   | 2    | u16     | flags                | §2.4                                                |
+| 50   | 2    | u16     | missed_before        | samples lost just before sample 0 (saturate 65535)  |
+| 52   | 2    | i16     | temp_centi_c         | -32768 = n/a                                        |
+| 54   | 2    | u16     | battery_mv           | 0 = n/a                                             |
+| 56   | 4    | u32     | reserved             | 0                                                   |
+| 60   | 4    | u32     | crc32                | over bytes 0..59 and 64..4095                       |
 
-## SUMMARY header offsets
+No SensorTime frame in this block (flag b7): `anchor_sensortime = 0xFFFFFFFF`, `anchor_sample_offset = 0xFFFF`;
+`anchor_mono_us` / `anchor_utc_ms` then refer to sample 0.
 
-Version is uint16 at offset 8, not inferred from byte sizes. V2 and v3 share sizes but have different field and time semantics. `_v3.bin` is a writer naming convention, not parser authority.
+### 2.4 Block flags
 
-| Offset | Type | Meaning |
-|---:|---|---|
-| 12 | uint16 | Record size, must be 90 |
-| 14 | uint16 | v1/v2 reserved; v3 summary_hz, must be 1 |
-| 16 | text[16] | Device |
-| 32 | text[16], v2/v3 | Firmware |
-| 48 | text[21], v2/v3 | Creation UTC |
-| 69 | uint8, v2/v3 | Header time-valid |
-| 70 | uint8, v2/v3 | v2 reserved; v3 time_basis, must be 1 |
-| 71 | uint32, v2/v3 | Dropped samples |
+| Bit  | Meaning                                                      |
+| ---- | ------------------------------------------------------------ |
+| 0    | discontinuity before sample 0 (new session, FIFO loss, resume) |
+| 1    | UTC valid                                                    |
+| 2    | clock adjusted since previous block                          |
+| 3    | low battery (battery_mv < `MOTION_LOW_BATT_MV`; 0 = disabled; flag only, no stop policy in this task) |
+| 4    | partial block (Stop or day rollover)                         |
+| 5    | accelerometer saturation                                     |
+| 6    | gyroscope saturation                                         |
+| 7    | no new SensorTime anchor in block                            |
+| 8–15 | reserved 0                                                   |
 
-V1 ends at byte 31; firmware/creation UTC are empty and header time-valid/dropped samples are null. V1/v2 reserved fields are not interpreted as frequency or time basis, even if their bytes happen to be 1. Their SUMMARY sampleRate remains null; explicit summaryHz metadata is optional. V3 reads summary_hz=1 at offset 14 and time_basis=1 at offset 70; other values are rejected. V3 header.summaryHz=1 and rateSource="v3 header" are available locally. External rate metadata must agree. No SUMMARY header stores RAW acquisition rate or sensor ranges.
+### 2.5 Sample — 12 B
 
-## SUMMARY record offsets
+`ax, ay, az, gx, gy, gz` as i16. No per-sample timestamp or status. Unused slots in a partial block are zero.
 
-| Offset | Type | Meaning and decoded scaling |
-|---:|---|---|
-| 0 | uint64 | v1/v2 emission UTC; v3 exclusive window-end UTC (ms), zero if invalid |
-| 8 | uint64 | v1/v2 mixed sensor/poll emission clock; v3 host monotonic exclusive window end (microseconds since boot) |
-| 16 | uint32 | Record ID |
-| 20 | uint16 | Actual aggregated sample count; v3 uses all samples collected in the window, not a fixed 100 |
-| 22, 26, 30 | int32 each | Acceleration X/Y/Z mean; divide by 1000 to g |
-| 34, 38, 42, 46 | uint32 each | Acceleration X/Y/Z/magnitude peak; divide by 1,000,000 to g |
-| 50, 54, 58 | int32 each | Gyroscope X/Y/Z mean; divide by 1000 to degrees/s |
-| 62, 66, 70, 74 | uint32 each | Gyroscope X/Y/Z/magnitude peak; divide by 1000 to degrees/s |
-| 78 | int16 | Temperature /100 to degrees C; -32768 means unavailable |
-| 80 | uint16 | Battery mV; zero means unavailable; decoder outputs volts, UI converts to mV |
-| 82, 83 | uint8 each | Acceleration/gyroscope saturation, nonzero means true |
-| 84 | uint32 | Missed samples |
-| 88 | uint16 | Status; decoder uses bit 5 for time validity |
+### 2.6 RAW semantics
 
-SUMMARY axis values are decoded without applying RAW validity-bit masking. V3 exposes status bits 0/1 paired acceleration/gyro validity, 2/3 saturation, 4 FIFO loss, 5 projected UTC valid, 6 timing/membership warning, and 7 gap spanning empty intervals. Bits 8-15 are reserved. V1/v2 only define bit 5 in SUMMARY. V3 window membership is approximate when bit 6 is set; sample-count variation alone is not proof of loss. Temperature and battery are emission-time readings, not window means. Magnitude of mean axes is derived in the UI; it is not the recorded peak magnitude.
+- `first_sample_index` counts samples actually written. Lost samples do not advance it; they set b0 + `missed_before`.
+  Time is reconstructed per contiguous run.
+- **Remove all host-side timestamp backfill/estimation** (this resolves the RAW timestamp-regression issue).
+  The anchor is the most recent FIFO SensorTime frame and the sample position it belongs to.
+- Blocks are written only as whole 4096 B units. A partial block is written only on Stop or rollover.
+- Reopen of a same-day file: validate header magic/version/CRC (invalid → sidecar, §2.1).
+  If `(size − 512) % 4096 ≠ 0`, append zero padding to the next block boundary (**never truncate**), then append.
+  `block_seq` continues from last valid block + 1.
+- Recovery/reading = forward block scan at 4096 B steps; valid block = magic `CS3B` + CRC OK; skip invalid blocks.
 
-## Time, sampling and export
+---
 
-RAW sensor time is relative and does not establish sample UTC. Legacy SUMMARY uses emission UTC and retains metadata-based nominal relative-time or record-order fallback. V3 records label completed half-open windows [utc_ms - 1000, utc_ms), or [sensor_time_us - 1000000, sensor_time_us) on the boot monotonic clock. Windows begin with each recording session, not necessarily on UTC integer seconds. UTC is back-projected at emission and can step/drift; monotonic bounds carry acquisition interval spacing. The viewer uses valid nondecreasing UTC, otherwise valid strictly increasing v3 monotonic ends, otherwise record order. It never compresses v3 gaps into index/Hz time. Record IDs are not global identities or time coordinates.
+## 3. SUMMARY v4 (uploaded)
 
-The default binary plot retains every ceil(recordCount/12000)-th record, with a minimum stride of one. Statistics and hover use these retained points. The complete-record count remains exact; extrema and the last original record may be omitted from the plot. Full CSV export decodes all complete records and includes metadata, record index and point fields. It has a different schema from daily SUMMARY CSV input and is not a viewer round-trip format.
+### 3.1 Layout
 
-## Sources and CSV limitation
+`[header 128 B][record 80 B] × N`. One file per recording session (segment).
+Lifecycle OPEN → FINALIZED (Stop/rollover) or RECOVERED (boot recovery).
 
-Local selection never uploads files. Cloud binaries are fetched through Worker read routes from private R2; the routes themselves are unauthenticated. The published index is separate metadata for CSV history. Its records array is currently empty. CSV loading currently fails due to undefined SUMMARY_COLUMNS in app.js; no working daily CSV contract is defined by this repository. See the Developer Manual before modifying this path.
+### 3.2 Header — 128 B
 
-## SUMMARY rate metadata and durations
+| Off  | Size | Type     | Field                  | Value / note                     |
+| ---- | ---- | -------- | ---------------------- | -------------------------------- |
+| 0    | 8    | char[8]  | magic                  | `CS3SUM01`                       |
+| 8    | 2    | u16      | format_version         | 4                                |
+| 10   | 2    | u16      | header_size            | 128                              |
+| 12   | 2    | u16      | record_size            | 80                               |
+| 14   | 2    | u16      | window_ms              | 1000                             |
+| 16   | 16   | char[16] | device_id              |                                  |
+| 32   | 16   | char[16] | firmware_version       |                                  |
+| 48   | 8    | u64      | start_utc_ms           | 0 if invalid                     |
+| 56   | 8    | u64      | start_mono_us          |                                  |
+| 64   | 4    | u32      | boot_count             |                                  |
+| 68   | 4    | u32      | segment_id             |                                  |
+| 72   | 4    | u32      | raw_date               | RAW file date at session start   |
+| 76   | 8    | u64      | raw_first_sample_index | first RAW sample of this session |
+| 84   | 2    | u16      | raw_rate_hz            | 100                              |
+| 86   | 2    | u16      | acc_range_g            |                                  |
+| 88   | 2    | u16      | gyro_range_dps         |                                  |
+| 90   | 1    | u8       | time_valid             | 0/1                              |
+| 91   | 1    | u8       | time_source            | 0 none, 1 RTC, 2 NTP             |
+| 92   | 1    | u8       | acc_conf               |                                  |
+| 93   | 1    | u8       | gyr_conf               |                                  |
+| 94   | 30   | u8[]     | reserved               | 0                                |
+| 124  | 4    | u32      | header_crc32           | over bytes 0..123                |
 
-RAW acquisition remains 100 Hz and SD-only. SUMMARY v3 emits each nonempty completed approximately one-second interval once, using every collected sample. Empty intervals are omitted; the unfinished final interval is discarded on Stop, while its RAW samples remain. The viewer does not generate missing intervals or upsample. Gap flags and monotonic discontinuities break plot lines even across subsampling. V1/v2 have no reliable local rate discriminator and retain their historical interpretation.
+### 3.3 Record — 80 B
 
-Timestamp span is last minus first endpoint across all complete original records. V3 representedDurationSeconds = recordCount / header.summaryHz counts completed recorded windows; it excludes omitted intervals. windowCoverageSeconds = endpoint span + one second measures first-window-start to last-end coverage, including gaps (preferring valid monotonic time). For ends at 1, 2 and 5 seconds: 3 recorded seconds, 4-second endpoint span, 5-second coverage. Header-only local v3 files decode with zero records; v3 upload requires at least one complete record and aligned tail. Legacy header-only behavior remains unchanged. Neither sum is a claim of exact hardware sample UTC. CRC covers original bytes including the version/rate fields.
+| Off  | Size | Type   | Field          | Note                                   |
+| ---- | ---- | ------ | -------------- | -------------------------------------- |
+| 0    | 8    | u64    | utc_end_ms     | exclusive window end; 0 if UTC invalid |
+| 8    | 4    | u32    | mono_end_ms    | ms since header start_mono_us          |
+| 12   | 4    | u32    | record_seq     | 0-based, contiguous per file           |
+| 16   | 2    | u16    | sample_count   |                                        |
+| 18   | 2    | u16    | missed_samples |                                        |
+| 20   | 2    | u16    | status         | §3.4                                   |
+| 22   | 2    | i16    | temp_centi_c   | -32768 = n/a                           |
+| 24   | 2    | u16    | battery_mv     | 0 = n/a                                |
+| 26   | 2    | u16    | acc_mag_max    | counts, saturate 65535                 |
+| 28   | 2    | u16    | gyro_mag_max   | counts, saturate 65535                 |
+| 30   | 6    | i16[3] | acc_mean       | x,y,z                                  |
+| 36   | 6    | u16[3] | acc_std        | population std                         |
+| 42   | 6    | i16[3] | acc_min        | signed                                 |
+| 48   | 6    | i16[3] | acc_max        | signed                                 |
+| 54   | 6    | i16[3] | gyro_mean      |                                        |
+| 60   | 6    | u16[3] | gyro_std       |                                        |
+| 66   | 6    | i16[3] | gyro_min       |                                        |
+| 72   | 6    | i16[3] | gyro_max       |                                        |
+| 78   | 2    | u16    | crc16          | over bytes 0..77                       |
+
+Computation: per axis int64 `sum`, `sumsq`; mean = round-half-away-from-zero(sum/n);
+std = round(sqrt(max(0, sumsq/n − mean_exact²))), saturate 65535; magnitudes compared squared, one sqrt at window end.
+If n = 0 for a sensor, its stats are 0 and its present-bit is clear.
+
+### 3.4 Status bits
+
+| Bit   | Meaning                                                  |
+| ----- | -------------------------------------------------------- |
+| 0     | accelerometer samples present                            |
+| 1     | gyroscope samples present                                |
+| 2     | accelerometer saturation                                 |
+| 3     | gyroscope saturation                                     |
+| 4     | FIFO loss / uncertain frame parse                        |
+| 5     | UTC valid                                                |
+| 6     | sample-timing anomaly                                    |
+| 7     | gap before this window (empty windows skipped)           |
+| 8     | clock adjusted inside window                             |
+| 9     | low battery (same rule as RAW b3)                        |
+| 10    | partial window (first aligned or final at Stop/rollover) |
+| 11–15 | reserved 0                                               |
+
+### 3.5 Window rules
+
+- If time valid: windows align to whole UTC seconds (`utc_end_ms % 1000 == 0`); otherwise to 1000 ms monotonic from session start.
+- Half-open `[end−1000, end)`. Empty windows are not written; the next written window sets bit 7.
+- The final partial window **is** written on Stop/rollover (bit 10).
+- Total dropped = Σ missed_samples. No mutable counter in any header.
+
+### 3.6 Valid prefix and upload
+
+- Valid prefix = header CRC OK + longest run of records from seq 0 with correct crc16 and contiguous `record_seq`.
+- FINALIZED: upload whole file; size must equal `128 + 80·N` exactly.
+- RECOVERED: upload exactly `[0, 128 + 80·valid_records)`; local file may be longer.
+- `size_bytes` and `crc32` in upload metadata describe the uploaded bytes. `file_format = "cs3_summary_v4"`.
+
+---

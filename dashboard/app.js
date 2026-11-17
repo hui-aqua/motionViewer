@@ -27,17 +27,6 @@ function fileUrl(record) {
 function fileUrlForRaw(record) {
   return record.raw_key ? workerContentUrl(record.raw_key) : "#";
 }
-function parseCsv(text) {
-  const lines = text.replace(/^\uFEFF/, "").trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const header = lines.shift().split(",").map((value) => value.trim());
-  if (!SUMMARY_COLUMNS.every((name, index) => header[index] === name)) throw new Error("CSV columns do not match the daily SUMMARY format");
-  return lines.map((line) => {
-    const columns = line.split(",");
-    const row = Object.fromEntries(header.map((key, index) => [key, columns[index]]));
-    return { t: row.UTC_time, ax: Number(row.acc_x_mean), ay: Number(row.acc_y_mean), az: Number(row.acc_z_mean), gx: Number(row.gyro_x_mean), gy: Number(row.gyro_y_mean), gz: Number(row.gyro_z_mean), row };
-  }).filter((point) => [point.ax, point.ay, point.az, point.gx, point.gy, point.gz].every(Number.isFinite));
-}
 function renderHistory() {
   const body = $("#history-body");
   if (!state.records.length) return;
@@ -62,11 +51,6 @@ function renderHistory() {
     row.append(action);
     return row;
   }));
-}
-async function loadSummary(record) {
-  const response = await fetch(fileUrl(record));
-  if (!response.ok) throw new Error(`Unable to download SUMMARY CSV (${response.status})`);
-  return parseCsv(await response.text());
 }
 function selectedCloudFile() {
   return state.cloudFiles.find((file) => file.key === $("#cloud-file").value) || null;
@@ -135,7 +119,8 @@ function timeLabel(index,exact=false){
  return (state.times[index]/1e6).toFixed(exact?6:2)+' s | '+(state.clock==='relative'?'nominal SUMMARY time':state.clock==='monotonic'?'host monotonic':'sensor');
 }
 function pointDetails(index){
- if(state.meta?.kind!=='summary'||state.meta.version!==3)return [];
+ const flags=state.points[index]?.statusFlags; if(flags) return ["Status flags — "+flags.join(", ")];
+ if(state.meta?.kind!=='summary'||state.meta.version!==4)return [];
  const p=state.points[index];
  return ['Window: 1 s, exclusive end',p.sampleCount+' samples'+(p.timingWarning?' | timing warning':'')+(p.emptyIntervalGap?' | empty interval gap':'')+(p.loss?' | detected loss':'')];
 }
@@ -144,16 +129,16 @@ function normalize(points){return points.map(p=>{if(!p.row)return {...p,batteryM
 function adopt(points,meta){
  exportSource=null;$('#export-csv').disabled=true;
  state.points=normalize(points);state.meta=meta;state.range=[0,1];state.selection=null;hover=null;
- const v3=meta.kind==='summary'&&meta.version===3;
+ const v4=meta.kind==='summary'&&meta.version===4;
  state.clock=meta.kind==='raw'?'sensor':'utc';
  let times=state.points.map(p=>meta.kind==='raw'?Number(p.t):p.row?Date.parse(p.t):Number(p.t));
  const invalid=meta.timestampsValid===false||times.some((t,i)=>!Number.isFinite(t)||(state.clock==='utc'&&(t<=0||t>8640000000000000||state.points[i].timeValid===false))||(i&&t<times[i-1]));
  if(invalid){
   state.clock='index';times=points.map((_,i)=>i);
-  if(v3&&meta.monotonicValid){
+  if(v4&&meta.monotonicValid){
    state.clock='monotonic';times=state.points.map(p=>Number(p.sensorTimeUs));
-   diagnostic('SUMMARY v3 UTC unavailable/discontinuous: using recorded host monotonic window ends; gaps preserved.');
-  }else if(!v3&&meta.kind==='summary'&&[1,10].includes(meta.summaryHz)){
+   diagnostic('SUMMARY v4 UTC unavailable/discontinuous: using recorded host monotonic window ends; gaps preserved.');
+  }else if(!v4&&meta.kind==='summary'&&meta.summaryHz===1){
    state.clock='relative';times=points.map((_,i)=>i*(meta.stride||1)/meta.summaryHz*1e6);
    diagnostic('Relative nominal legacy SUMMARY time from upload metadata; no UTC reconstruction.');
   }else diagnostic('Unavailable/discontinuous timestamps: plot uses record order. No duration or gap-free clock is reconstructed.');
@@ -167,17 +152,24 @@ function adopt(points,meta){
  $('#sample-info').textContent=points.length.toLocaleString()+' displayed / '+meta.count.toLocaleString()+' records';
  $('#plot-empty').hidden=!!points.length;$('#plot-empty strong').textContent='No complete records';$('#plot-empty span').textContent='This recording has no samples to display.';
  $('#file-info').replaceChildren();
- const labels={summaryHz:'SUMMARY frequency (Hz)',rateSource:'Frequency source',crc32:'CRC32 (whole file)',representedDurationSeconds:v3?'Recorded completed windows total (s)':'Approximate represented duration (s)',timestampSpanSeconds:'Recorded UTC endpoint span (s)',monotonicSpanSeconds:'Recorded monotonic endpoint span (s)',windowCoverageSeconds:'First window start to last end (s; includes gaps)',timestampSemantics:'Record timestamp meaning',headerTimeBasis:'Header time_basis',bytes:'File size (bytes)',count:'Complete records',device:'Device ID',date:'Date / creation time',snapshotKey:'R2 snapshot key',timeBasis:'Chart time basis'};
+ const labels={summaryHz:'SUMMARY frequency (Hz)',rateSource:'Frequency source',crc32:'CRC32 (whole file)',representedDurationSeconds:v4?'Recorded completed windows total (s)':'Approximate represented duration (s)',timestampSpanSeconds:'Recorded UTC endpoint span (s)',monotonicSpanSeconds:'Recorded monotonic endpoint span (s)',windowCoverageSeconds:'First window start to last end (s; includes gaps)',timestampSemantics:'Record timestamp meaning',headerTimeBasis:'Header time_basis',bytes:'File size (bytes)',count:'Complete records',device:'Device ID',date:'Date / creation time',snapshotKey:'R2 snapshot key',timeBasis:'Chart time basis'};
  for(const [key,val] of Object.entries(meta)){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=labels[key]||key;dd.textContent=val??'Unavailable';$('#file-info').append(dt,dd);}
  for(const option of $('#signal').options){const signal=signals[option.value];option.disabled=!state.points.some(p=>signal.keys.some(k=>Number.isFinite(p[k])||typeof p[k]==='boolean'));}
  if($('#signal').selectedOptions[0].disabled)$('#signal').value='acc';state.series=$('#signal').value;
- notice(meta.tail?'Recording has an incomplete final record. Complete records are shown; preserve the original file.':v3?'SUMMARY v3: timestamps label exclusive ends of completed 1-second windows. Empty intervals are omitted; unfinished final intervals are discarded by firmware.':'');
+ notice(meta.tail?'Recording has an incomplete final record. Complete records are shown; preserve the original file.':v4?'SUMMARY v4: timestamps label exclusive ends of completed 1-second windows. Empty intervals are omitted; partial first and final intervals carry a status flag.':'');
  update();
 }
 
-async function openLocal(file){if(!file)return;const token=++loadToken;notice('Opening recordingâ€¦');try{let points,meta,source;if(file.name.toLowerCase().endsWith('.csv')){source=await file.text();points=parseCsv(source);meta={kind:'summary',count:points.length};}else{source=await file.arrayBuffer();const result=decodeBinary(source);points=result.points;meta={kind:result.kind,count:result.recordCount,device:result.header.device,date:result.header.createdUtc,rate:result.header.sampleRate,summaryHz:result.header.summaryHz,rateSource:result.header.rateSource,crc32:motionCrc32(source),timestampSpanSeconds:result.timestampSpanSeconds,timestampsValid:result.timestampsValid,monotonicValid:result.monotonicValid,monotonicSpanSeconds:result.monotonicSpanSeconds,windowCoverageSeconds:result.windowCoverageSeconds,timestampSemantics:result.header.timestampSemantics,headerTimeBasis:result.header.timeBasis,stride:result.stride,tail:result.tailBytes,version:result.header.version,headerBytes:result.header.headerBytes,recordBytes:result.header.recordBytes,firmware:result.header.firmware,droppedSamples:result.header.droppedSamples};}if(token!==loadToken)return;adopt(points,{...meta,filename:file.name,source:'Local file',bytes:file.size});exportSource=source;$('#export-csv').disabled=false;link('#download-link',null);link('#raw-download-link',null);setOriginal(URL.createObjectURL(file),file.name);originalUrl=$('#original').href;}catch(error){if(token===loadToken)fail('This file could not be opened. Choose a valid RAW or SUMMARY recording.',error);}}
+async function openLocal(file){if(!file)return;const token=++loadToken;notice('Opening recordingâ€¦');try{let points,meta,source;{source=await file.arrayBuffer();const result=decodeBinary(source);points=result.points;meta={kind:result.kind,count:result.recordCount,device:result.header.device,date:result.header.createdUtc,rate:result.header.sampleRate,summaryHz:result.header.summaryHz,rateSource:result.header.rateSource,crc32:motionCrc32(source),timestampSpanSeconds:result.timestampSpanSeconds,timestampsValid:result.timestampsValid,monotonicValid:result.monotonicValid,monotonicSpanSeconds:result.monotonicSpanSeconds,windowCoverageSeconds:result.windowCoverageSeconds,timestampSemantics:result.header.timestampSemantics,headerTimeBasis:result.header.timeBasis,stride:result.stride,tail:result.tailBytes,version:result.header.version,headerBytes:result.header.headerBytes,recordBytes:result.header.recordBytes,firmware:result.header.firmware,droppedSamples:result.header.droppedSamples};}if(token!==loadToken)return;adopt(points,{...meta,filename:file.name,source:'Local file',bytes:file.size});exportSource=source;$('#export-csv').disabled=false;link('#download-link',null);link('#raw-download-link',null);setOriginal(URL.createObjectURL(file),file.name);originalUrl=$('#original').href;}catch(error){if(token===loadToken)fail('This file could not be opened. Choose a SUMMARY v4 recording.',error);}}
 function renderList(query=''){const filtered=state.records.filter(r=>`${r.filename} ${r.device_id} ${r.timestamp}`.toLowerCase().includes(query.toLowerCase()));$('#record-list').replaceChildren();if(!filtered.length){$('#record-list').textContent='No published summaries available.';return;}for(const r of filtered){const b=document.createElement('button');b.className='record-item';b.textContent=`${r.device_id} Â· ${r.filename} Â· ${formatDate(r.timestamp)}`;b.onclick=()=>selectRecord(r);$('#record-list').append(b);}}
-async function selectRecord(record){const token=++loadToken;notice('Opening summaryâ€¦');try{const points=await loadSummary(record);if(token!==loadToken)return;adopt(points,{filename:record.filename,kind:'summary',device:record.device_id,date:record.timestamp,count:points.length,source:'Published CSV',bytes:record.size_bytes});setOriginal(fileUrl(record),record.filename);link('#download-link',fileUrl(record),record.filename);link('#raw-download-link',record.raw_key?fileUrlForRaw(record):null,record.raw_filename);}catch(e){if(token===loadToken)fail('Summary unavailable. Local files can still be opened normally.',e);}}
+async function selectRecord(record) {
+  try {
+    const response = await fetch(fileUrl(record));
+    if (!response.ok) throw Error(`SUMMARY download (${response.status})`);
+    const buffer = await response.arrayBuffer();
+    await openLocal({name: record.filename, size: buffer.byteLength, arrayBuffer: async () => buffer});
+  } catch (error) { fail('Summary unavailable.', error); }
+}
 function sortSnapshots(files){
  const sorted=files.slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))||Number(b.size_bytes)-Number(a.size_bytes)||String(b.uploaded||'').localeCompare(String(a.uploaded||''))||String(a.key).localeCompare(String(b.key)));
  const dates=new Set();return sorted.map(f=>{const preferred=!dates.has(f.date);dates.add(f.date);return {...f,preferred};});
@@ -204,7 +196,7 @@ function visibleSpan(a,b){
  if(state.clock==='index')return (b-a+1)+' records visible; duration unavailable';
  const seconds=(state.times[b]-state.times[a])/((state.clock==='sensor'||state.clock==='relative'||state.clock==='monotonic')?1e6:1000);
  const hours=Math.floor(seconds/3600),minutes=Math.floor(seconds%3600/60);
- return (state.meta?.kind==='summary'&&state.meta.version===3?'Visible window-end span: ':'Visible span: ')+(hours?hours+' h ':'')+(minutes?minutes+' min ':'')+(seconds%60).toFixed(3)+' s';
+ return (state.meta?.kind==='summary'&&state.meta.version===4?'Visible window-end span: ':'Visible span: ')+(hours?hours+' h ':'')+(minutes?minutes+' min ':'')+(seconds%60).toFixed(3)+' s';
 }
 function bounds(){const n=state.points.length;return [Math.floor(state.range[0]*Math.max(0,n-1)),Math.ceil(state.range[1]*Math.max(0,n-1))];}
 // Analysis selection is stored in data time, independently of the viewport.
@@ -224,8 +216,32 @@ function clearSelection(){state.selection=null;update();}
 function setRange(a,b){const min=Math.min(1,2/Math.max(2,state.points.length-1));const width=Math.max(min,Math.min(1,b-a));a=Math.max(0,Math.min(1-width,a));state.range=[a,a+width];hover=null;update();}
 function xFraction(event){const r=$('#chart').getBoundingClientRect();return Math.max(0,Math.min(1,(event.clientX-r.left-64)/(r.width-82)));}
 function update(){$('#clear-selection').disabled=!state.selection;updateTimeZoneLabel();const s=signals[state.series];$('#chart-subtitle').textContent=`${s.label} Â· ${s.unit}`;$('#axes').hidden=!s.vector;$('#range-start').value=Math.round(state.range[0]*1000);$('#range-end').value=Math.round(state.range[1]*1000);const [a,b]=bounds();$('#range-label').textContent=state.points.length?`${axisLabel(state.times[a],1)} to ${axisLabel(state.times[b],1)} | ${visibleSpan(a,b)}${state.clock==='utc'?' | '+displayTimeZone:state.clock==='monotonic'?' | recorded host monotonic':state.clock==='relative'?' | nominal SUMMARY time':''}`:'Full recording';drawChart();statistics();}
-function statistics(){if(!$('#analysis').open)return;if(!state.points.length){$('#stats-note').textContent='Open a recording to calculate statistics.';$('#stats').replaceChildren();return;}const [a,b]=analysisBounds();$('#stats-note').textContent=`${state.selection?'Selected range':'Visible range'} Â· ${b-a+1} displayed records. ${state.meta?.stride>1?'Statistics use evenly sampled plot points, not every original record.':'Statistics describe displayed records.'} RMS of SUMMARY means is not raw-sample RMS. ${state.meta?.version===3?'V3 statistics cover recorded windows only, without sample-count weighting or filled gaps. ':''}Units: ${signals[state.series].unit}.`;$('#stats').replaceChildren();for(const e of entries()){let count=0,sum=0,squares=0,min=Infinity,max=-Infinity;for(let i=a;i<=b;i++){const v=value(state.points[i]||{},e.key);if(!Number.isFinite(v))continue;count++;sum+=v;squares+=v*v;min=Math.min(min,v);max=Math.max(max,v);}const tr=document.createElement('tr');for(const v of [e.label,...(count?[sum/count,Math.sqrt(squares/count),min,max,Math.max(Math.abs(min),Math.abs(max))]:Array(5).fill(null))]){const td=document.createElement('td');td.textContent=typeof v==='number'?v.toFixed(5):v??'â€”';tr.append(td);}$('#stats').append(tr);}}
-function drawChart(){const canvas=$('#chart'),r=canvas.getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);const w=r.width,h=r.height,L=64,R=w-18,T=18,B=h-34;const css=getComputedStyle(document.documentElement);ctx.font='11px system-ui';const [a,b]=bounds(),es=entries();let min=Infinity,max=-Infinity;for(let i=a;i<=b;i++)for(const e of es){const v=value(state.points[i]||{},e.key);if(Number.isFinite(v)){min=Math.min(min,v);max=Math.max(max,v);}}if(!Number.isFinite(min)){min=-1;max=1;}if(min===max){min-=1;max+=1;}const margin=(max-min)*.08;min-=margin;max+=margin;const t0=state.times[a],t1=state.times[b],span=t1-t0;const x=i=>L+(R-L)*(span?(state.times[i]-t0)/span:(i-a)/Math.max(1,b-a));const y=v=>T+(max-v)/(max-min)*(B-T);for(let i=0;i<=4;i++){const yy=T+(B-T)*i/4;ctx.strokeStyle=css.getPropertyValue('--grid');ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(R,yy);ctx.stroke();ctx.fillStyle=css.getPropertyValue('--muted');ctx.textAlign='right';ctx.fillText((max-(max-min)*i/4).toFixed(2),L-9,yy+4);}if(!state.points.length){$('#tooltip').hidden=true;return;}ctx.save();ctx.beginPath();ctx.rect(L,T,R-L,B-T);ctx.clip();for(const e of es){ctx.strokeStyle=e.color;ctx.lineWidth=1.5;ctx.beginPath();let connected=false;for(let i=a;i<=b;i++){const v=value(state.points[i],e.key);if(!Number.isFinite(v)){connected=false;continue;}if(state.meta?.version===3&&state.points[i].gapBefore)connected=false;connected?ctx.lineTo(x(i),y(v)):ctx.moveTo(x(i),y(v));connected=true;}ctx.stroke();if(state.meta?.kind==='summary'&&state.meta.version===3){ctx.fillStyle=e.color;for(let i=a;i<=b;i++){const v=value(state.points[i],e.key);if(Number.isFinite(v))ctx.fillRect(x(i)-1.5,y(v)-1.5,3,3);}}}const selected=drag?.select&&drag.moved?selectionTimes(drag):state.selection;if(selected){ctx.fillStyle='#397bd233';const p=L+(selected[0]-t0)/(span||1)*(R-L),q=L+(selected[1]-t0)/(span||1)*(R-L);ctx.fillRect(p,T,q-p,B-T);}if(hover!=null){ctx.strokeStyle=css.getPropertyValue('--muted');ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x(hover),T);ctx.lineTo(x(hover),B);ctx.stroke();}ctx.restore();ctx.fillStyle=css.getPropertyValue('--muted');ctx.textAlign='center';for(const tick of timeTicks(t0,t1,R-L)){const xx=L+(R-L)*(span?(tick.time-t0)/span:0);ctx.strokeStyle=css.getPropertyValue('--grid');ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,B);ctx.stroke();ctx.fillText(tick.label,xx,h-10);}$('#tooltip').hidden=hover==null;if(hover!=null)$('#tooltip').textContent=[timeLabel(hover,true),...es.map(e=>`${e.label}: ${Number.isFinite(value(state.points[hover],e.key))?value(state.points[hover],e.key).toPrecision(8):'Unavailable'} ${signals[state.series].unit}`),...pointDetails(hover)].join('\n');}
+function statistics(){if(!$('#analysis').open)return;if(!state.points.length){$('#stats-note').textContent='Open a recording to calculate statistics.';$('#stats').replaceChildren();return;}const [a,b]=analysisBounds();$('#stats-note').textContent=`${state.selection?'Selected range':'Visible range'} Â· ${b-a+1} displayed records. ${state.meta?.stride>1?'Statistics use evenly sampled plot points, not every original record.':'Statistics describe displayed records.'} RMS of SUMMARY means is not raw-sample RMS. ${state.meta?.version===4?'V4 statistics cover recorded windows only, without sample-count weighting or filled gaps. ':''}Units: ${signals[state.series].unit}.`;$('#stats').replaceChildren();for(const e of entries()){let count=0,sum=0,squares=0,min=Infinity,max=-Infinity;for(let i=a;i<=b;i++){const v=value(state.points[i]||{},e.key);if(!Number.isFinite(v))continue;count++;sum+=v;squares+=v*v;min=Math.min(min,v);max=Math.max(max,v);}const tr=document.createElement('tr');for(const v of [e.label,...(count?[sum/count,Math.sqrt(squares/count),min,max,Math.max(Math.abs(min),Math.abs(max))]:Array(5).fill(null))]){const td=document.createElement('td');td.textContent=typeof v==='number'?v.toFixed(5):v??'â€”';tr.append(td);}$('#stats').append(tr);}}
+
+function drawSummaryBands(ctx, entry, a, b, x, y) {
+  if (!['ax','ay','az','gx','gy','gz'].includes(entry.key)) return;
+  for (const [low, high, alpha] of [
+    [p => p[entry.key + 'Min'], p => p[entry.key + 'Max'], .10],
+    [p => p[entry.key] - p[entry.key + 'Std'], p => p[entry.key] + p[entry.key + 'Std'], .22]
+  ]) {
+    let start = a;
+    while (start <= b) {
+      let end = start;
+      while (end < b && !state.points[end + 1].gapBefore) ++end;
+      ctx.beginPath();
+      for (let i = start; i <= end; ++i) {
+        const p = state.points[i];
+        if (i === start) ctx.moveTo(x(i), y(low(p)));
+        else ctx.lineTo(x(i), y(low(p)));
+      }
+      for (let i = end; i >= start; --i) ctx.lineTo(x(i), y(high(state.points[i])));
+      ctx.closePath(); ctx.fillStyle = entry.color; ctx.globalAlpha = alpha; ctx.fill(); ctx.globalAlpha = 1;
+      start = end + 1;
+    }
+  }
+}
+
+function drawChart(){const canvas=$('#chart'),r=canvas.getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);const w=r.width,h=r.height,L=64,R=w-18,T=18,B=h-34;const css=getComputedStyle(document.documentElement);ctx.font='11px system-ui';const [a,b]=bounds(),es=entries();let min=Infinity,max=-Infinity;for(let i=a;i<=b;i++)for(const e of es){const v=value(state.points[i]||{},e.key);if(Number.isFinite(v)){min=Math.min(min,v,state.points[i][e.key+"Min"]??v,v-(state.points[i][e.key+"Std"]??0));max=Math.max(max,v,state.points[i][e.key+"Max"]??v,v+(state.points[i][e.key+"Std"]??0));}}if(!Number.isFinite(min)){min=-1;max=1;}if(min===max){min-=1;max+=1;}const margin=(max-min)*.08;min-=margin;max+=margin;const t0=state.times[a],t1=state.times[b],span=t1-t0;const x=i=>L+(R-L)*(span?(state.times[i]-t0)/span:(i-a)/Math.max(1,b-a));const y=v=>T+(max-v)/(max-min)*(B-T);for(let i=0;i<=4;i++){const yy=T+(B-T)*i/4;ctx.strokeStyle=css.getPropertyValue('--grid');ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(R,yy);ctx.stroke();ctx.fillStyle=css.getPropertyValue('--muted');ctx.textAlign='right';ctx.fillText((max-(max-min)*i/4).toFixed(2),L-9,yy+4);}if(!state.points.length){$('#tooltip').hidden=true;return;}ctx.save();ctx.beginPath();ctx.rect(L,T,R-L,B-T);ctx.clip();for(const e of es){drawSummaryBands(ctx,e,a,b,x,y);ctx.strokeStyle=e.color;ctx.lineWidth=1.5;ctx.beginPath();let connected=false;for(let i=a;i<=b;i++){const v=value(state.points[i],e.key);if(!Number.isFinite(v)){connected=false;continue;}if(state.meta?.version===4&&state.points[i].gapBefore)connected=false;connected?ctx.lineTo(x(i),y(v)):ctx.moveTo(x(i),y(v));connected=true;}ctx.stroke();if(state.meta?.kind==='summary'&&state.meta.version===4){ctx.fillStyle=e.color;for(let i=a;i<=b;i++){const v=value(state.points[i],e.key);if(Number.isFinite(v))ctx.fillRect(x(i)-1.5,y(v)-1.5,3,3);}}}const selected=drag?.select&&drag.moved?selectionTimes(drag):state.selection;if(selected){ctx.fillStyle='#397bd233';const p=L+(selected[0]-t0)/(span||1)*(R-L),q=L+(selected[1]-t0)/(span||1)*(R-L);ctx.fillRect(p,T,q-p,B-T);}if(hover!=null){ctx.strokeStyle=css.getPropertyValue('--muted');ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x(hover),T);ctx.lineTo(x(hover),B);ctx.stroke();}ctx.restore();ctx.fillStyle=css.getPropertyValue('--muted');ctx.textAlign='center';for(const tick of timeTicks(t0,t1,R-L)){const xx=L+(R-L)*(span?(tick.time-t0)/span:0);ctx.strokeStyle=css.getPropertyValue('--grid');ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,B);ctx.stroke();ctx.fillText(tick.label,xx,h-10);}$('#tooltip').hidden=hover==null;if(hover!=null)$('#tooltip').textContent=[timeLabel(hover,true),...es.map(e=>`${e.label}: ${Number.isFinite(value(state.points[hover],e.key))?value(state.points[hover],e.key).toPrecision(8):'Unavailable'} ${signals[state.series].unit}`),...pointDetails(hover)].join('\n');}
 const chart=$('#chart');chart.addEventListener('wheel',e=>{if(!state.points.length)return;e.preventDefault();const f=xFraction(e),[a,b]=state.range,width=(b-a)*Math.exp(Math.max(-1,Math.min(1,e.deltaY*.002))),anchor=a+f*(b-a);setRange(anchor-f*width,anchor+(1-f)*width);},{passive:false});
 const pointers=new Map();
 function inspectPoint(f){
@@ -285,7 +301,7 @@ $('#clear-selection').onclick=clearSelection;$('#reset').onclick=()=>setRange(0,
 $('#open-file').onclick=()=>$('#local-file').click();$('#local-file').onchange=e=>{openLocal(e.target.files[0]);e.target.value='';};let dragDepth=0;document.addEventListener('dragenter',e=>{if(e.dataTransfer.types.includes('Files')){e.preventDefault();dragDepth++;document.body.classList.add('dragging');}});document.addEventListener('dragover',e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();});document.addEventListener('dragleave',()=>{if(--dragDepth<=0)document.body.classList.remove('dragging');});document.addEventListener('drop',e=>{e.preventDefault();dragDepth=0;document.body.classList.remove('dragging');openLocal(e.dataTransfer.files[0]);});
 $('#cloud-toggle').onclick=()=>{const panel=$('#cloud-panel');panel.hidden=!panel.hidden;$('#cloud-toggle').setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden&&!state.cloudFiles.length)fetchCloudFiles();};$('#cloud-device').onchange=fetchCloudFiles;$('#cloud-file').onchange=updateCloudDownload;$('#load-cloud').onclick=loadCloudFile;$('#refresh-cloud').onclick=fetchCloudFiles;$('#search').oninput=e=>renderList(e.target.value);
 const systemTheme=matchMedia('(prefers-color-scheme: dark)');function applyTheme(){const mode=$('#theme').value;document.documentElement.dataset.theme=mode==='system'?(systemTheme.matches?'dark':'light'):mode;drawChart();}try{$('#theme').value=localStorage.getItem('motion-theme')||'light';}catch{}$('#theme').onchange=()=>{try{localStorage.setItem('motion-theme',$('#theme').value);}catch{}applyTheme();};systemTheme.addEventListener('change',applyTheme);new ResizeObserver(drawChart).observe($('#plot-wrap'));applyTheme();
-async function init(){try{const response=await fetch(INDEX_URL,{cache:'no-store'});if(!response.ok)throw Error(`Index request failed (${response.status})`);const data=await response.json();if(!Array.isArray(data.records))throw Error('Index records missing');state.records=data.records.slice().sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));renderList();renderHistory();}catch(e){$('#record-list').textContent='Published summaries unavailable. Local files can still be opened normally.';diagnostic(e);}}init();
+async function init(){try{const response=await fetch(INDEX_URL,{cache:'no-store'});if(!response.ok)throw Error(`Index request failed (${response.status})`);const data=await response.json();if(!Array.isArray(data.records))throw Error('Index records missing');state.records=data.records.filter(r=>r.file_format==='cs3_summary_v4').slice().sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));renderList();renderHistory();}catch(e){$('#record-list').textContent='Published summaries unavailable. Local files can still be opened normally.';diagnostic(e);}}init();
 
 async function initDevices(){
  const select=$('#cloud-device');

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import binascii
 import hashlib
 import json
 import os
@@ -29,7 +30,7 @@ async def upload(file: UploadFile = File(...), device_id: str = Form(...), times
     if not SAFE_ID.fullmatch(device_id):
         raise HTTPException(status_code=422, detail="Invalid device_id")
     is_summary = measurement_type == "motion_summary"
-    if not is_summary and (sampling_frequency != 50 or measurement_type != "acceleration" or file_format != "binary"):
+    if not is_summary or file_format != "cs3_summary_v4":
         raise HTTPException(status_code=422, detail="Unexpected measurement metadata")
     try:
         captured = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -51,7 +52,7 @@ async def upload(file: UploadFile = File(...), device_id: str = Form(...), times
     if is_summary:
         hz = summary_hz if summary_hz is not None else sampling_frequency
         actual_crc = f"{zlib.crc32(content):08x}"
-        if hz not in (1, 10) or (sampling_frequency is not None and sampling_frequency != hz):
+        if hz != 1 or (sampling_frequency is not None and sampling_frequency != hz):
             raise HTTPException(status_code=422, detail="Invalid or conflicting SUMMARY frequency")
         if device_id not in READ_DEVICES:
             raise HTTPException(status_code=422, detail="Unsupported SUMMARY device")
@@ -61,19 +62,19 @@ async def upload(file: UploadFile = File(...), device_id: str = Form(...), times
             raise HTTPException(status_code=422, detail="CRC32 mismatch or invalid CRC32")
         if size_bytes is None or not re.fullmatch(r"[0-9]+", size_bytes) or int(size_bytes) != len(content):
             raise HTTPException(status_code=422, detail="size_bytes mismatch")
-        if len(content) < 32:
+        if len(content) < 128:
             raise HTTPException(status_code=422, detail="Truncated SUMMARY header")
-        version, header_bytes, record_bytes = struct.unpack_from("<HHH", content, 8)
-        expected = {1: 32, 2: 75, 3: 75}.get(version)
-        header_device = content[16:32].split(b"\0", 1)[0].decode("utf-8", errors="replace").strip()
-        if (content[:8] != b"CS3SUM01" or expected is None or header_bytes != expected
-                or len(content) < header_bytes or record_bytes != 90 or (len(content) - header_bytes) % 90
-                or header_device != device_id or file_format != f"cs3_summary_v{version}"):
-            raise HTTPException(status_code=422, detail="Invalid SUMMARY header, device, format or record alignment")
-        if version == 3 and (hz != 1 or struct.unpack_from("<H", content, 14)[0] != 1 or content[70] != 1):
-            raise HTTPException(status_code=422, detail="Invalid SUMMARY v3 rate/time basis or metadata conflict")
-        if version == 3 and len(content) == header_bytes:
-            raise HTTPException(status_code=422, detail="SUMMARY v3 upload requires at least one complete window")
+        version, header_bytes, record_bytes, window_ms = struct.unpack_from("<4H", content, 8)
+        header_device = content[16:32].split(b"\0", 1)[0].decode("ascii", errors="replace")
+        if (content[:8] != b"CS3SUM01" or version != 4 or header_bytes < 128 or record_bytes < 80
+                or len(content) <= header_bytes or (len(content) - header_bytes) % record_bytes
+                or window_ms != 1000 or header_device != device_id
+                or struct.unpack_from("<I", content, 124)[0] != zlib.crc32(content[:124])):
+            raise HTTPException(status_code=422, detail="Invalid SUMMARY v4 header or size")
+        for seq, offset in enumerate(range(header_bytes, len(content), record_bytes)):
+            if (struct.unpack_from("<I", content, offset + 12)[0] != seq
+                    or struct.unpack_from("<H", content, offset + 78)[0] != binascii.crc_hqx(content[offset:offset + 78], 0xffff)):
+                raise HTTPException(status_code=422, detail="Invalid SUMMARY record CRC16 or sequence")
         destination = DATA_DIR / device_id / date.replace("-", "/") / f"{actual_crc}.bin"
         destination.parent.mkdir(parents=True, exist_ok=True)
         exists = destination.exists()
@@ -83,11 +84,11 @@ async def upload(file: UploadFile = File(...), device_id: str = Form(...), times
                     "sampling_frequency": hz, "measurement_type": measurement_type, "file_format": file_format,
                     "crc32": actual_crc, "sha256": digest, "size_bytes": len(content), "original_filename": filename,
                     "firmware": content[32:48].split(b"\0", 1)[0].decode("utf-8", errors="replace").strip() if version >= 2 else "",
-                    "created_utc": content[48:69].split(b"\0", 1)[0].decode("utf-8", errors="replace").strip() if version >= 2 else "",
-                    "format_version": version, "time_basis": 1 if version == 3 else None,
-                    "timestamp_semantics": "exclusive completed-window end" if version == 3 else "legacy emission time",
-                    "record_count": (len(content) - header_bytes) // 90,
-                    "represented_duration_seconds": ((len(content) - header_bytes) // 90) / hz}
+                    "created_utc": datetime.fromtimestamp(struct.unpack_from("<Q", content, 48)[0] / 1000, timezone.utc).isoformat(),
+                    "format_version": version, "time_basis": "session monotonic",
+                    "timestamp_semantics": "exclusive window end",
+                    "record_count": (len(content) - header_bytes) // record_bytes,
+                    "represented_duration_seconds": ((len(content) - header_bytes) // record_bytes) / hz}
         if not exists:
             destination.write_bytes(content)
             destination.with_suffix(".metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -95,10 +96,4 @@ async def upload(file: UploadFile = File(...), device_id: str = Form(...), times
             metadata = json.loads(destination.with_suffix(".metadata.json").read_text(encoding="utf-8"))
         result = "ALREADY_EXISTS" if exists else "STORED"
         return {**metadata, "status": result, "result": result, "filename": filename, "storage": "local-test", "path": destination.as_posix()}
-    destination = DATA_DIR / device_id / captured.astimezone(timezone.utc).strftime("%Y/%m/%d") / filename
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
-        raise HTTPException(status_code=409, detail="Filename already exists with different content")
-    if not destination.exists():
-        destination.write_bytes(content)
-    return {"status": "success", "device_id": device_id, "filename": filename, "size_bytes": len(content), "sha256": digest, "storage": "local-test", "path": destination.as_posix()}
+    raise HTTPException(status_code=422, detail="Unsupported format")
