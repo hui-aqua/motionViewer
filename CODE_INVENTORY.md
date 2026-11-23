@@ -11,7 +11,7 @@ Inventory date: 2026-11-13. Source was read before the manuals. Scope is this ch
 | `dashboard/index.html`, `dashboard/style.css` | Single static viewer page, deferred decoder then app scripts; responsive canvas, themes, local/cloud controls, statistics, metadata and diagnostics (`index.html:2-16`, `style.css:1-8`). |
 | `dashboard/decoder.js` | DOM-free IIFE exposing three globals shared by browser and Worker (`decoder.js:174-176`). |
 | `dashboard/app.js` | Classic browser script; state, async loading, formatting, chart, statistics and events. Starts `init()`, theme/layout handling and `initDevices()` at script evaluation (`app.js:284-300`). |
-| `dashboard/devices.json` | Nine IDs: CS01–CS04 and CS3_00–CS3_04. Worker imports at bundle time, FastAPI reads at import time, browser fetches at startup. |
+| `former static device registry` | Nine IDs: CS01–CS04 and CS3_00–CS3_04. Worker imports at bundle time, FastAPI reads at import time, browser fetches at startup. |
 | `backend/worker/index.js` | ES module default object with async `fetch(request, env)`; imports decoder and registry (`index.js:1-2,98-220`). Uploads to R2, public reads from R2. |
 | `backend/app/main.py` | FastAPI app, local upload and health handlers; independent Python header checks and disk persistence (`main.py:14-104`). |
 | `backend/app/__init__.py` | Empty package marker, no API. |
@@ -133,7 +133,7 @@ Statistics use selected time interval if one exists, otherwise visible retained 
 | Node | package.json devDependency wrangler ^4.160.0; lock pins 4.160.0 with Node engine >=22.12.0 (`package-lock.json:1514-1537`). Transitive versions are locked in package-lock.json, including workerd 1.20261110.1. No frontend runtime dependency or top-level engines declaration. |
 | Python | fastapi>=0.115,<1; uvicorn[standard]>=0.30,<1; python-multipart>=0.0.9,<1 (`backend/requirements.txt:1-3`). No Python lock or formal requires-python; union annotations require Python 3.10+. |
 | npm scripts | npm test → node scripts/test_viewer.cjs && node scripts/test_summary_workflow.cjs; worker:build → wrangler deploy --dry-run --outdir .wrangler/build; worker:dev → wrangler dev; worker:deploy → wrangler deploy (`package.json:4-8`). |
-| Local viewer | python -m http.server 8000 --directory dashboard; serves binary viewer and registry, but not repository data/index.json at requested /data/index.json. Pages-equivalent staging must copy index.html,app.js,decoder.js,devices.json,style.css plus data/index.json. |
+| Local viewer | python -m http.server 8000 --directory dashboard; serves binary viewer and registry, but not repository data/index.json at requested /data/index.json. Pages-equivalent staging must copy index.html,app.js,decoder.js,former static device registry,style.css plus data/index.json. |
 | Python service | Install requirements; set environment before import; uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8787. .env.example is illustrative, not autoloaded. |
 | Python checks | .\.venv\Scripts\python.exe scripts/test_local_summary.py; not included in npm test or Pages workflow. |
 | Syntax | node --check dashboard/app.js; node --check dashboard/decoder.js. |

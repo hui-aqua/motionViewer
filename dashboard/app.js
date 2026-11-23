@@ -306,11 +306,11 @@ async function init(){try{const response=await fetch(INDEX_URL,{cache:'no-store'
 async function initDevices(){
  const select=$('#cloud-device');
  try{
-  const response=await fetch(new URL('devices.json',document.baseURI),{cache:'no-store'});
+  const response=await fetch(new URL('/api/v1/devices',WORKER_URL),{mode:'cors',cache:'no-store'});
   if(!response.ok)throw Error(`Device registry request failed (${response.status})`);
-  const devices=await response.json();
-  if(!Array.isArray(devices)||!devices.length||devices.some(id=>typeof id!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(id)))throw Error('Invalid device registry');
-  select.replaceChildren(...devices.map(id=>new Option(id,id)));select.value=devices[0];select.disabled=false;
+  const {devices}=await response.json();
+  if(!Array.isArray(devices)||!devices.length||devices.some(device=>!device||typeof device.id!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(device.id)||typeof device.display_name!=='string'||!device.display_name.trim()))throw Error('Invalid device registry');
+  select.replaceChildren(...devices.map(device=>new Option(device.display_name,device.id)));select.value=devices[0].id;select.disabled=false;
  }catch(e){select.disabled=true;$('#cloud-status').textContent='Device list unavailable. Refresh the page to retry.';diagnostic(e);}
 }
 const devicesReady=initDevices();

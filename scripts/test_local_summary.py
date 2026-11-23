@@ -9,6 +9,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from app import main
 from fastapi import HTTPException, UploadFile
 
+# Exercise the registry client offline, then stub it for upload-handler checks.
+from unittest.mock import patch
+with patch.object(main, 'urlopen', return_value=io.BytesIO(b'{"devices":[{"id":"CS3_01","display_name":"Sensor"}]}')) as request:
+    assert main.read_devices() == frozenset(['CS3_01'])
+    request.assert_called_once_with(main.DEVICES_API_URL, timeout=10)
+for payload in [b'{}', b'{"devices":[]}', b'{"devices":[{"id":"bad/id"}]}']:
+    with patch.object(main, 'urlopen', return_value=io.BytesIO(payload)):
+        try:
+            main.read_devices()
+            raise AssertionError('Invalid registry accepted')
+        except HTTPException as error:
+            assert error.status_code == 503
+main.read_devices = lambda: frozenset(['CS3_01'])
+
 async def run():
     data = (Path(__file__).resolve().parents[2] / 'CoreS3_MotionLogger/test/fixtures/summary_v4_sample.bin').read_bytes()[:448]
     async def send(content, **changes):

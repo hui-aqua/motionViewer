@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import binascii
 import hashlib
 import json
@@ -9,6 +10,7 @@ import struct
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.request import urlopen
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
@@ -16,7 +18,21 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 DATA_DIR = Path(os.getenv("DATA_DIR", "data/uploads"))
 DEVICE_API_KEY = os.getenv("DEVICE_API_KEY", "dev-test-key")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-READ_DEVICES = frozenset(json.loads((Path(__file__).resolve().parents[2] / "dashboard" / "devices.json").read_text(encoding="utf-8")))
+DEVICES_API_URL = os.getenv("DEVICES_API_URL", "https://marine-motion-storage-api.stavanger.workers.dev/api/v1/devices")
+
+def read_devices() -> frozenset[str]:
+    try:
+        with urlopen(DEVICES_API_URL, timeout=10) as response:
+            devices = json.load(response)["devices"]
+        if not isinstance(devices, list) or not devices or any(
+            not isinstance(device, dict) or not isinstance(device.get("id"), str)
+            or not SAFE_ID.fullmatch(device["id"]) for device in devices
+        ):
+            raise ValueError("Invalid public device registry")
+        return frozenset(device["id"] for device in devices)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="Device registry unavailable") from error
+
 app = FastAPI(title="Marine Data Logger Upload API", version="0.1.0")
 
 @app.get("/health")
@@ -54,7 +70,7 @@ async def upload(file: UploadFile = File(...), device_id: str = Form(...), times
         actual_crc = f"{zlib.crc32(content):08x}"
         if hz != 1 or (sampling_frequency is not None and sampling_frequency != hz):
             raise HTTPException(status_code=422, detail="Invalid or conflicting SUMMARY frequency")
-        if device_id not in READ_DEVICES:
+        if device_id not in await asyncio.to_thread(read_devices):
             raise HTTPException(status_code=422, detail="Unsupported SUMMARY device")
         if date != captured.astimezone(timezone.utc).strftime("%Y-%m-%d"):
             raise HTTPException(status_code=422, detail="date must match timestamp UTC date")

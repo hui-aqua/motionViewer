@@ -2,10 +2,21 @@ const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict');
 const elements=new Map(),events={};const noop=()=>{};function el(id){if(elements.has(id))return elements.get(id);const e={id,value:id==='#theme'?'light':id==='#signal'?'acc':id==='#cloud-device'?'CS3_00':'',textContent:'',hidden:false,disabled:false,style:{},dataset:{},classList:{toggle:noop,add:noop,remove:noop},setAttribute(k,v){this[k]=v},getAttribute(k){return this[k]},append(...nodes){(this.children??=[]).push(...nodes)},replaceChildren(...nodes){this.children=nodes},addEventListener(k,fn){(this.events??={})[k]=fn},getBoundingClientRect(){return {width:1200,height:500,left:0}},getContext(){return new Proxy({},{get:()=>noop,set:()=>true})},setPointerCapture:noop,click:noop};elements.set(id,e);return e;}
 const document={querySelector:el,createElement:()=>el(Symbol()),documentElement:{dataset:{}},body:el('body'),addEventListener(k,fn){events[k]=fn},baseURI:'http://localhost/dashboard/'};
 class TestURL extends URL { static createObjectURL(){return "blob:test"} static revokeObjectURL(){} }
-const ctx=vm.createContext({document,window:{},URL:TestURL,Option:function(text,value){this.text=text;this.value=value},ArrayBuffer,Uint8Array,DataView,TextDecoder,BigInt,console,devicePixelRatio:1,matchMedia:()=>({matches:false,addEventListener:noop}),localStorage:{getItem:()=>null,setItem:noop},getComputedStyle:()=>({getPropertyValue:()=> '#888'}),ResizeObserver:class{observe(){}},fetch:async url=>String(url).endsWith('devices.json')?{ok:true,json:async()=>JSON.parse(fs.readFileSync('dashboard/devices.json','utf8'))}:{ok:false,status:404}});ctx.window=ctx;el('#signal').options=['acc','gyro','temperature','battery'].map(value=>({value}));Object.defineProperty(el('#signal'),'selectedOptions',{get(){return this.options.filter(o=>o.value===this.value)}});vm.runInContext(fs.readFileSync('dashboard/decoder.js','utf8'),ctx);vm.runInContext(fs.readFileSync('dashboard/app.js','utf8'),ctx);
+const ctx=vm.createContext({document,window:{},URL:TestURL,Option:function(text,value){this.text=text;this.value=value},ArrayBuffer,Uint8Array,DataView,TextDecoder,BigInt,console,devicePixelRatio:1,matchMedia:()=>({matches:false,addEventListener:noop}),localStorage:{getItem:()=>null,setItem:noop},getComputedStyle:()=>({getPropertyValue:()=> '#888'}),ResizeObserver:class{observe(){}},fetch:async url=>new URL(url).pathname==='/api/v1/devices'?{ok:true,json:async()=>({devices:[{id:'CS3_00',display_name:'Main sensor'},{id:'CS3_01',display_name:'Second sensor'}]})}:{ok:false,status:404}});ctx.window=ctx;el('#signal').options=['acc','gyro','temperature','battery'].map(value=>({value}));Object.defineProperty(el('#signal'),'selectedOptions',{get(){return this.options.filter(o=>o.value===this.value)}});vm.runInContext(fs.readFileSync('dashboard/decoder.js','utf8'),ctx);vm.runInContext(fs.readFileSync('dashboard/app.js','utf8'),ctx);
 
 (async()=>{
  await vm.runInContext('devicesReady',ctx);
+ assert.equal(el('#cloud-device').disabled,false);
+ assert.equal(el('#cloud-device').value,'CS3_00');
+ assert.equal(el('#cloud-device').children[0].text,'Main sensor');
+ assert.equal(el('#cloud-device').children[1].value,'CS3_01');
+ const apiFetch=ctx.fetch;
+ for(const response of [{ok:false,status:503},{ok:true,json:async()=>({devices:[{id:'bad/id',display_name:'Bad'}]})},{ok:true,json:async()=>({devices:[]})},{ok:true,json:async()=>({devices:[{id:'valid'}]})}]) {
+  ctx.fetch=async()=>response;await ctx.initDevices();assert.equal(el('#cloud-device').disabled,true);
+  assert.ok(el('#cloud-status').textContent.includes('Device list unavailable'));
+ }
+ ctx.fetch=apiFetch;await ctx.initDevices();
+ assert.equal(el('#cloud-device').disabled,false);
  const file=fs.readFileSync('../CoreS3_MotionLogger/test/fixtures/summary_v4_sample.bin');
  const buffer=file.buffer.slice(file.byteOffset,file.byteOffset+file.byteLength);
  const result=ctx.decodeBinary(buffer);
