@@ -1,3 +1,5 @@
+> Historical pre-migration audit: Worker paths and tooling below refer to Storage@5ff3f26426e4bfe7505113adc674a26bf087bcac. Current Worker maintenance is in CoreS3_MotionLogger/cloudflare-worker.
+
 # Documentation audit and proposed revision log
 
 Audit date: 2026-11-13. **Phases 1–3 complete; Phase 4 awaits user confirmation. README.md and DEVELOPER_MANUAL.md have not been edited.** This is the pre-edit audit report, not a claim that revisions have been delivered.

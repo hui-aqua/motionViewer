@@ -4,6 +4,6 @@ The Viewer opens SUMMARY v4 recordings locally or through the Worker cloud listi
 
 Serve the dashboard locally with `python -m http.server 8000 --directory dashboard`, then open http://localhost:8000. Use Open file or drop a v4 `.bin`. Pan, zoom and choose the displayed axes and signals. CSV export includes the valid record prefix and physical units.
 
-The backend accepts only `cs3_summary_v4`. Deploy it together with CoreS3 firmware 1.2.0 and publish the updated dashboard through the existing Pages workflow. Copy old SD data before the firmware upgrade. The device auto-resumes after reset and requires a confirmed STOP before retrieval or transport.
+The Viewer is read-only and consumes GET /api/v1/files and GET /api/v1/files/content. The Worker is maintained and deployed from CoreS3_MotionLogger/cloudflare-worker. Publish the dashboard through the existing Pages workflow. Copy old SD data before the firmware upgrade. The device auto-resumes after reset and requires a confirmed STOP before retrieval or transport.
 
-See DEVELOPER_MANUAL.md for local tests and rollout commands, and docs/dashboard-data-format.md for byte layouts.
+See DEVELOPER_MANUAL.md for local tests and rollout commands, and docs/dashboard-data-format.md for the authoritative schema pointer.

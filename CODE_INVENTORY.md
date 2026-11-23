@@ -1,3 +1,5 @@
+> Historical pre-migration audit: Worker paths and tooling below refer to Storage@5ff3f26426e4bfe7505113adc674a26bf087bcac. Current Worker maintenance is in CoreS3_MotionLogger/cloudflare-worker.
+
 # Current source inventory
 
 Inventory date: 2026-11-13. Source was read before the manuals. Scope is this checkout, not sibling firmware or deployed infrastructure. No application source was changed. Line references refer to the source at audit time.
